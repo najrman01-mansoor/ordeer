@@ -1,0 +1,137 @@
+{
+  "name": "Shreeji - 04 - Admin Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shreeji/admin/order/status",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-admin-status",
+      "name": "Webhook - Update Order Status",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $input.first().json;\nconst headers = req.headers || {};\nconst body = req.body || {};\n\nconst authHeader = headers.authorization || headers.Authorization || body.token || '';\nlet token = authHeader.replace(/^Bearer /i, '').trim();\n\nif (!token) {\n  return [{ json: { error: true, statusCode: 401, message: 'Unauthorized.' } }];\n}\n\nlet decoded;\ntry {\n  decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));\n} catch(e) {\n  return [{ json: { error: true, statusCode: 401, message: 'Invalid token.' } }];\n}\n\nif (decoded.role !== 'ADMIN') {\n  return [{ json: { error: true, statusCode: 403, message: 'Forbidden. Admin privileges required.' } }];\n}\n\nconst orderId = (body.orderId || '').trim();\nconst newStatus = (body.newStatus || '').trim();\nconst remarks = (body.remarks || '').trim() || 'Status updated by Admin';\n\nconst validStatuses = [\n  'Order Submitted',\n  'Production Planned',\n  'Production Completed',\n  'Invoice Generated',\n  'Dispatched',\n  'Out for Delivery',\n  'Delivered',\n  'Cancelled'\n];\n\nif (!orderId || !validStatuses.includes(newStatus)) {\n  return [{ json: { error: true, statusCode: 400, message: 'Valid Order ID and recognized status are required.' } }];\n}\n\nreturn [{\n  json: {\n    adminId: decoded.userId,\n    adminName: decoded.username,\n    orderId,\n    newStatus,\n    remarks\n  }\n}];"
+      },
+      "id": "node-validate-admin-status",
+      "name": "Verify Admin Role & Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH curr_order AS (\n  SELECT id, status FROM shreeji_app.orders WHERE order_id = $1\n),\nupdated AS (\n  UPDATE shreeji_app.orders\n  SET status = $2, updated_at = NOW()\n  WHERE order_id = $1\n  RETURNING id, order_id, status\n),\nlogged AS (\n  INSERT INTO shreeji_app.order_status_history (\n    order_id,\n    previous_status,\n    new_status,\n    updated_by,\n    updated_by_name,\n    remarks\n  )\n  SELECT u.id, c.status, $2, $3, $4, $5\n  FROM updated u\n  CROSS JOIN curr_order c\n)\nSELECT u.order_id, c.status AS old_status, u.status AS new_status\nFROM updated u\nCROSS JOIN curr_order c;",
+        "additionalFields": {
+          "queryParams": "={{ [ $json.orderId, $json.newStatus, $json.adminId, $json.adminName, $json.remarks ] }}"
+        }
+      },
+      "id": "node-update-order-status-db",
+      "name": "Update Status & Write Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [640, 300],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Shreeji PostgreSQL (shreeji_db)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  success: true,\n  statusCode: 200,\n  message: 'Order status updated successfully',\n  orderId: $json.order_id,\n  previousStatus: $json.old_status,\n  currentStatus: $json.new_status\n}) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-admin-status",
+      "name": "Respond - Status Updated",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "shreeji/admin/reports",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-admin-reports",
+      "name": "Webhook - Admin Reports",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 560]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH client_report AS (\n  SELECT \n    c.hospital_name, \n    c.client_code,\n    COUNT(o.id)::INT AS total_orders,\n    COALESCE(SUM(o.total_lots), 0)::INT AS total_lots,\n    COALESCE(SUM(o.total_quantity), 0)::NUMERIC(10,2) AS total_quantity,\n    COUNT(CASE WHEN o.status = 'Delivered' THEN 1 END)::INT AS delivered,\n    COUNT(CASE WHEN o.status = 'Cancelled' THEN 1 END)::INT AS cancelled\n  FROM shreeji_app.clients c\n  LEFT JOIN shreeji_app.orders o ON c.id = o.client_id AND o.deleted_at IS NULL\n  GROUP BY c.id, c.hospital_name, c.client_code\n  ORDER BY total_orders DESC\n),\nproduct_report AS (\n  SELECT \n    p.name AS product_name,\n    p.product_code,\n    COUNT(o.id)::INT AS order_count,\n    COALESCE(SUM(o.total_quantity), 0)::NUMERIC(10,2) AS total_quantity\n  FROM shreeji_app.products p\n  LEFT JOIN shreeji_app.orders o ON p.id = o.product_id AND o.deleted_at IS NULL\n  GROUP BY p.id, p.name, p.product_code\n  ORDER BY order_count DESC\n)\nSELECT \n  (SELECT json_agg(c) FROM client_report c) AS clients,\n  (SELECT json_agg(p) FROM product_report p) AS products;",
+        "additionalFields": {}
+      },
+      "id": "node-query-admin-reports",
+      "name": "Query Aggregated Reports",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [440, 560],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Shreeji PostgreSQL (shreeji_db)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  success: true,\n  clientReports: $json.clients || [],\n  productReports: $json.products || []\n}) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-admin-reports",
+      "name": "Respond - Admin Reports",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [660, 560]
+    }
+  ],
+  "connections": {
+    "Webhook - Update Order Status": {
+      "main": [[{ "node": "Verify Admin Role & Input", "type": "main", "index": 0 }]]
+    },
+    "Verify Admin Role & Input": {
+      "main": [[{ "node": "Update Status & Write Audit", "type": "main", "index": 0 }]]
+    },
+    "Update Status & Write Audit": {
+      "main": [[{ "node": "Respond - Status Updated", "type": "main", "index": 0 }]]
+    },
+    "Webhook - Admin Reports": {
+      "main": [[{ "node": "Query Aggregated Reports", "type": "main", "index": 0 }]]
+    },
+    "Query Aggregated Reports": {
+      "main": [[{ "node": "Respond - Admin Reports", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

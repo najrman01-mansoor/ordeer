@@ -1,0 +1,24 @@
+{
+  "name": "Shreeji Client Order Management Portal",
+  "short_name": "Shreeji Order",
+  "description": "Client Order Management System for Shreeji Imaging and Diagnostics Center Private Limited",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FFF8F8",
+  "theme_color": "#B51224",
+  "icons": [
+    {
+      "src": "./assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,190 @@
+{
+  "name": "Shreeji - 02 - Order Management Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shreeji/order/create",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-create-order",
+      "name": "Webhook - Create Order",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $input.first().json;\nconst headers = req.headers || {};\nconst body = req.body || {};\n\n// 1. Authenticate Token\nconst authHeader = headers.authorization || headers.Authorization || '';\nlet token = '';\nif (authHeader.startsWith('Bearer ')) {\n  token = authHeader.substring(7).trim();\n} else if (body.token) {\n  token = body.token;\n}\n\nif (!token) {\n  return [{ json: { error: true, statusCode: 401, message: 'Unauthorized. Authentication token missing.' } }];\n}\n\nlet decoded;\ntry {\n  decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));\n} catch (e) {\n  return [{ json: { error: true, statusCode: 401, message: 'Invalid authentication token.' } }];\n}\n\nif (!decoded || !decoded.userId || (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000))) {\n  return [{ json: { error: true, statusCode: 401, message: 'Session expired. Please log in again.' } }];\n}\n\n// 2. Validate Order Input\nconst orderDate = (body.orderDate || '').trim();\nconst productId = parseInt(body.productId, 10);\nconst destination = (body.destination || '').trim();\nconst notes = (body.notes || '').trim();\nconst lots = Array.isArray(body.lots) ? body.lots : [];\n\nif (!orderDate) {\n  return [{ json: { error: true, statusCode: 400, message: 'Order Date is mandatory.' } }];\n}\nif (isNaN(productId) || productId <= 0) {\n  return [{ json: { error: true, statusCode: 400, message: 'Valid Product selection is mandatory.' } }];\n}\nif (!destination) {\n  return [{ json: { error: true, statusCode: 400, message: 'Destination / Hospital department is mandatory.' } }];\n}\nif (lots.length === 0) {\n  return [{ json: { error: true, statusCode: 400, message: 'At least one lot is compulsory.' } }];\n}\n\nlet totalQuantity = 0;\nconst validatedLots = [];\n\nfor (let i = 0; i < lots.length; i++) {\n  const lot = lots[i];\n  const qty = parseFloat(lot.quantity);\n  const unit = (lot.unit || '').trim();\n  const calDate = (lot.calibrationDate || '').trim();\n  const calTime = (lot.calibrationTime || '').trim();\n\n  if (isNaN(qty) || qty <= 0) {\n    return [{ json: { error: true, statusCode: 400, message: `Lot #${i+1}: Quantity must be greater than zero.` } }];\n  }\n  if (!['mCi', 'Dose'].includes(unit)) {\n    return [{ json: { error: true, statusCode: 400, message: `Lot #${i+1}: Unit must be either 'mCi' or 'Dose'.` } }];\n  }\n  if (!calDate || !calTime) {\n    return [{ json: { error: true, statusCode: 400, message: `Lot #${i+1}: Calibration date and time are mandatory.` } }];\n  }\n\n  totalQuantity += qty;\n  validatedLots.push({\n    lotNumber: i + 1,\n    quantity: qty,\n    unit: unit,\n    calibrationDate: calDate,\n    calibrationTime: calTime\n  });\n}\n\nreturn [{\n  json: {\n    userId: decoded.userId,\n    clientId: decoded.clientId, // STRICT server-side identity: never trust body.clientId\n    clientRole: decoded.role,\n    hospitalName: decoded.hospitalName,\n    orderDate,\n    productId,\n    destination,\n    notes,\n    totalLots: validatedLots.length,\n    totalQuantity,\n    lots: validatedLots\n  }\n}];"
+      },
+      "id": "node-validate-order-payload",
+      "name": "Verify Token & Validate Lots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH inserted_order AS (\n  INSERT INTO shreeji_app.orders (\n    client_id,\n    order_date,\n    product_id,\n    destination,\n    notes,\n    total_lots,\n    total_quantity,\n    created_by\n  ) VALUES (\n    $1, $2, $3, $4, $5, $6, $7, $8\n  ) RETURNING id, order_id, client_id, order_date, status, total_lots, total_quantity, submission_timestamp\n),\nstatus_log AS (\n  INSERT INTO shreeji_app.order_status_history (\n    order_id,\n    previous_status,\n    new_status,\n    updated_by,\n    updated_by_name,\n    remarks\n  ) SELECT id, NULL, 'Order Submitted', $8, $9, 'Initial order placement via client portal' FROM inserted_order\n)\nSELECT * FROM inserted_order;",
+        "additionalFields": {
+          "queryParams": "={{ [ $json.clientId, $json.orderDate, $json.productId, $json.destination, $json.notes, $json.totalLots, $json.totalQuantity, $json.userId, $json.hospitalName ] }}"
+        }
+      },
+      "id": "node-insert-order-header",
+      "name": "Insert Order Header & Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [640, 300],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Shreeji PostgreSQL (shreeji_db)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const orderData = $input.first().json;\nconst lots = $('Verify Token & Validate Lots').first().json.lots;\nconst orderId = orderData.order_id;\nconst internalOrderId = orderData.id;\n\n// Generate parameterized multi-row insert for order_lots\nconst lotInserts = lots.map((lot, idx) => {\n  const lotIndexPad = String(lot.lotNumber).padStart(2, '0');\n  const uniqueLotId = `${orderId}-L${lotIndexPad}`;\n  return {\n    orderInternalId: internalOrderId,\n    lotId: uniqueLotId,\n    lotNumber: lot.lotNumber,\n    quantity: lot.quantity,\n    unit: lot.unit,\n    calibrationDate: lot.calibrationDate,\n    calibrationTime: lot.calibrationTime\n  };\n});\n\nreturn [{\n  json: {\n    order: orderData,\n    lotInserts\n  }\n}];"
+      },
+      "id": "node-prep-lots",
+      "name": "Prepare Lot Records",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO shreeji_app.order_lots (order_id, lot_id, lot_number, quantity, unit, calibration_date, calibration_time)\nSELECT \n  $1::BIGINT,\n  (x->>'lotId')::VARCHAR,\n  (x->>'lotNumber')::INT,\n  (x->>'quantity')::NUMERIC,\n  (x->>'unit')::VARCHAR,\n  (x->>'calibrationDate')::DATE,\n  (x->>'calibrationTime')::TIME\nFROM jsonb_array_elements($2::jsonb) AS x;",
+        "additionalFields": {
+          "queryParams": "={{ [ $json.order.id, JSON.stringify($json.lotInserts) ] }}"
+        }
+      },
+      "id": "node-insert-lots",
+      "name": "Insert Multiple Lots",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1080, 300],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Shreeji PostgreSQL (shreeji_db)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  success: true,\n  statusCode: 201,\n  message: 'Order submitted successfully',\n  orderId: $('Prepare Lot Records').first().json.order.order_id,\n  totalLots: $('Prepare Lot Records').first().json.order.total_lots,\n  totalQuantity: $('Prepare Lot Records').first().json.order.total_quantity,\n  status: $('Prepare Lot Records').first().json.order.status,\n  submissionTimestamp: $('Prepare Lot Records').first().json.order.submission_timestamp\n}) }}",
+        "options": {
+          "responseCode": 201,
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" },
+              { "name": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-create-order",
+      "name": "Respond - Order Created",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "shreeji/orders",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-list-orders",
+      "name": "Webhook - List Orders",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 560]
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $input.first().json;\nconst headers = req.headers || {};\nconst query = req.query || {};\n\nconst authHeader = headers.authorization || headers.Authorization || query.token || '';\nlet token = authHeader.replace(/^Bearer /i, '').trim();\n\nif (!token) {\n  return [{ json: { error: true, statusCode: 401, message: 'Unauthorized access.' } }];\n}\n\nlet decoded;\ntry {\n  decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));\n} catch(e) {\n  return [{ json: { error: true, statusCode: 401, message: 'Invalid session.' } }];\n}\n\nreturn [{\n  json: {\n    userId: decoded.userId,\n    clientId: decoded.clientId,\n    role: decoded.role,\n    fromDate: query.fromDate || null,\n    toDate: query.toDate || null,\n    status: query.status || null,\n    productId: query.productId ? parseInt(query.productId, 10) : null,\n    orderId: query.orderId ? query.orderId.trim() : null,\n    page: parseInt(query.page || 1, 10),\n    limit: Math.min(parseInt(query.limit || 50, 10), 100)\n  }\n}];"
+      },
+      "id": "node-parse-list-orders",
+      "name": "Parse Filter Parameters",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 560]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  o.id, \n  o.order_id, \n  o.client_id, \n  c.hospital_name,\n  c.client_code,\n  o.order_date, \n  o.submission_timestamp, \n  p.id AS product_id,\n  p.name AS product_name, \n  o.destination, \n  o.notes, \n  o.status, \n  o.total_lots, \n  o.total_quantity, \n  o.created_at,\n  o.updated_at\nFROM shreeji_app.orders o\nJOIN shreeji_app.clients c ON o.client_id = c.id\nJOIN shreeji_app.products p ON o.product_id = p.id\nWHERE o.deleted_at IS NULL\n  AND ($1::INT IS NULL OR o.client_id = $1)\n  AND ($2::DATE IS NULL OR o.order_date >= $2)\n  AND ($3::DATE IS NULL OR o.order_date <= $3)\n  AND ($4::VARCHAR IS NULL OR o.status = $4)\n  AND ($5::INT IS NULL OR o.product_id = $5)\n  AND ($6::VARCHAR IS NULL OR o.order_id ILIKE '%' || $6 || '%')\nORDER BY o.submission_timestamp DESC\nLIMIT $7 OFFSET $8;",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $json.role === 'ADMIN' ? null : $json.clientId,\n  $json.fromDate,\n  $json.toDate,\n  $json.status,\n  $json.productId,\n  $json.orderId,\n  $json.limit,\n  ($json.page - 1) * $json.limit\n] }}"
+        }
+      },
+      "id": "node-query-order-list",
+      "name": "Query Filtered Orders",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [640, 560],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Shreeji PostgreSQL (shreeji_db)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  success: true,\n  count: $input.all().length,\n  orders: $input.all().map(item => item.json)\n}) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-list-orders",
+      "name": "Respond - Order List",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [860, 560]
+    }
+  ],
+  "connections": {
+    "Webhook - Create Order": {
+      "main": [[{ "node": "Verify Token & Validate Lots", "type": "main", "index": 0 }]]
+    },
+    "Verify Token & Validate Lots": {
+      "main": [[{ "node": "Insert Order Header & Log", "type": "main", "index": 0 }]]
+    },
+    "Insert Order Header & Log": {
+      "main": [[{ "node": "Prepare Lot Records", "type": "main", "index": 0 }]]
+    },
+    "Prepare Lot Records": {
+      "main": [[{ "node": "Insert Multiple Lots", "type": "main", "index": 0 }]]
+    },
+    "Insert Multiple Lots": {
+      "main": [[{ "node": "Respond - Order Created", "type": "main", "index": 0 }]]
+    },
+    "Webhook - List Orders": {
+      "main": [[{ "node": "Parse Filter Parameters", "type": "main", "index": 0 }]]
+    },
+    "Parse Filter Parameters": {
+      "main": [[{ "node": "Query Filtered Orders", "type": "main", "index": 0 }]]
+    },
+    "Query Filtered Orders": {
+      "main": [[{ "node": "Respond - Order List", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

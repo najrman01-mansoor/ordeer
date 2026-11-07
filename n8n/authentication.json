@@ -1,0 +1,132 @@
+{
+  "name": "Shreeji - 01 - Authentication Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shreeji/auth/login",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-login",
+      "name": "Webhook - Login",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst username = (body.username || '').trim();\nconst password = (body.password || '').trim();\n\nif (!username || !password) {\n  return [{\n    json: {\n      error: true,\n      statusCode: 400,\n      message: 'Username and password are required.'\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    username,\n    password,\n    clientIp: $input.first().json.headers['x-forwarded-for'] || '127.0.0.1'\n  }\n}];"
+      },
+      "id": "node-validate-login",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT u.id AS user_id, u.client_id, u.username, u.email, u.role, u.full_name, u.is_active, c.hospital_name, c.client_code, c.destination_name FROM shreeji_app.users u LEFT JOIN shreeji_app.clients c ON u.client_id = c.id WHERE (u.username = $1 OR u.email = $1) AND u.password_hash = crypt($2, u.password_hash) AND u.is_active = TRUE;",
+        "additionalFields": {
+          "queryParams": "={{ [ $json.username, $json.password ] }}"
+        }
+      },
+      "id": "node-query-user",
+      "name": "Query User & Verify Password",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [640, 300],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Shreeji PostgreSQL (shreeji_db)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\nif (!rows || rows.length === 0 || !rows[0].json || !rows[0].json.user_id) {\n  return [{\n    json: {\n      success: false,\n      statusCode: 401,\n      message: 'Invalid credentials or inactive account.'\n    }\n  }];\n}\n\nconst user = rows[0].json;\nconst tokenPayload = {\n  userId: user.user_id,\n  clientId: user.client_id,\n  username: user.username,\n  role: user.role,\n  hospitalName: user.hospital_name || 'Shreeji Central Admin',\n  exp: Math.floor(Date.now() / 1000) + (8 * 3600)\n};\n\nconst token = Buffer.from(JSON.stringify(tokenPayload)).toString('base64');\n\nreturn [{\n  json: {\n    success: true,\n    statusCode: 200,\n    message: 'Login successful',\n    token: token,\n    user: {\n      id: user.user_id,\n      clientId: user.client_id,\n      clientCode: user.client_code,\n      username: user.username,\n      email: user.email,\n      fullName: user.full_name,\n      role: user.role,\n      hospitalName: user.hospital_name || 'Central Admin',\n      destinationName: user.destination_name || ''\n    }\n  }\n}];"
+      },
+      "id": "node-build-token",
+      "name": "Create Session Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode || 200 }}",
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" },
+              { "name": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-login",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shreeji/auth/logout",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-logout",
+      "name": "Webhook - Logout",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 520]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Logged out successfully' }) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" },
+              { "name": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-logout",
+      "name": "Respond - Logout",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [440, 520]
+    }
+  ],
+  "connections": {
+    "Webhook - Login": {
+      "main": [[{ "node": "Validate Input", "type": "main", "index": 0 }]]
+    },
+    "Validate Input": {
+      "main": [[{ "node": "Query User & Verify Password", "type": "main", "index": 0 }]]
+    },
+    "Query User & Verify Password": {
+      "main": [[{ "node": "Create Session Token", "type": "main", "index": 0 }]]
+    },
+    "Create Session Token": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+    },
+    "Webhook - Logout": {
+      "main": [[{ "node": "Respond - Logout", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

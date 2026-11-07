@@ -1,0 +1,81 @@
+{
+  "name": "Shreeji - 03 - Dashboard Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "shreeji/dashboard",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-dashboard",
+      "name": "Webhook - Client Dashboard",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $input.first().json;\nconst headers = req.headers || {};\nconst query = req.query || {};\n\nconst authHeader = headers.authorization || headers.Authorization || query.token || '';\nlet token = authHeader.replace(/^Bearer /i, '').trim();\n\nif (!token) {\n  return [{ json: { error: true, statusCode: 401, message: 'Unauthorized. Please login.' } }];\n}\n\nlet decoded;\ntry {\n  decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));\n} catch(e) {\n  return [{ json: { error: true, statusCode: 401, message: 'Invalid session.' } }];\n}\n\nif (!decoded || !decoded.userId || (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000))) {\n  return [{ json: { error: true, statusCode: 401, message: 'Session expired.' } }];\n}\n\nreturn [{\n  json: {\n    userId: decoded.userId,\n    clientId: decoded.clientId,\n    role: decoded.role,\n    hospitalName: decoded.hospitalName\n  }\n}];"
+      },
+      "id": "node-validate-dash-token",
+      "name": "Verify Token & Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH client_filter AS (\n  SELECT $1::INT AS cid, $2::VARCHAR AS user_role\n),\nfiltered_orders AS (\n  SELECT o.*, p.name AS product_name\n  FROM shreeji_app.orders o\n  JOIN shreeji_app.products p ON o.product_id = p.id\n  CROSS JOIN client_filter cf\n  WHERE o.deleted_at IS NULL\n    AND (cf.user_role = 'ADMIN' OR o.client_id = cf.cid)\n),\ncounts AS (\n  SELECT\n    COUNT(*)::INT AS total_orders,\n    COUNT(CASE WHEN status NOT IN ('Delivered', 'Cancelled') THEN 1 END)::INT AS pending_orders,\n    COUNT(CASE WHEN order_date = CURRENT_DATE THEN 1 END)::INT AS today_orders,\n    COUNT(CASE WHEN status = 'Delivered' THEN 1 END)::INT AS delivered_orders,\n    COUNT(CASE WHEN status = 'Cancelled' THEN 1 END)::INT AS cancelled_orders,\n    COALESCE(SUM(total_lots), 0)::INT AS total_lots,\n    COUNT(CASE WHEN status = 'Production Planned' THEN 1 END)::INT AS production_planned,\n    COUNT(CASE WHEN status = 'Dispatched' THEN 1 END)::INT AS dispatched_orders\n  FROM filtered_orders\n),\nproduct_summary AS (\n  SELECT \n    product_name,\n    COUNT(*)::INT AS order_count,\n    COALESCE(SUM(total_quantity), 0)::NUMERIC(10,2) AS total_qty\n  FROM filtered_orders\n  GROUP BY product_name\n  ORDER BY order_count DESC\n),\nstatus_summary AS (\n  SELECT \n    status,\n    COUNT(*)::INT AS count\n  FROM filtered_orders\n  GROUP BY status\n),\nrecent_orders AS (\n  SELECT \n    order_id,\n    order_date,\n    submission_timestamp,\n    product_name,\n    destination,\n    total_lots,\n    total_quantity,\n    status\n  FROM filtered_orders\n  ORDER BY submission_timestamp DESC\n  LIMIT 8\n)\nSELECT \n  (SELECT row_to_json(c) FROM counts c) AS metrics,\n  (SELECT json_agg(p) FROM product_summary p) AS products,\n  (SELECT json_agg(s) FROM status_summary s) AS statuses,\n  (SELECT json_agg(r) FROM recent_orders r) AS recent;",
+        "additionalFields": {
+          "queryParams": "={{ [ $json.clientId, $json.role ] }}"
+        }
+      },
+      "id": "node-aggregate-dash-data",
+      "name": "Query Metrics & Breakdown",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [640, 300],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Shreeji PostgreSQL (shreeji_db)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  success: true,\n  hospital: $('Verify Token & Role').first().json.hospitalName,\n  role: $('Verify Token & Role').first().json.role,\n  metrics: $json.metrics || {\n    total_orders: 0, pending_orders: 0, today_orders: 0,\n    delivered_orders: 0, cancelled_orders: 0, total_lots: 0,\n    production_planned: 0, dispatched_orders: 0\n  },\n  products: $json.products || [],\n  statuses: $json.statuses || [],\n  recentOrders: $json.recent || []\n}) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-dashboard",
+      "name": "Respond - Dashboard Data",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [860, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Client Dashboard": {
+      "main": [[{ "node": "Verify Token & Role", "type": "main", "index": 0 }]]
+    },
+    "Verify Token & Role": {
+      "main": [[{ "node": "Query Metrics & Breakdown", "type": "main", "index": 0 }]]
+    },
+    "Query Metrics & Breakdown": {
+      "main": [[{ "node": "Respond - Dashboard Data", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

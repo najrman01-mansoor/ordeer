@@ -1,0 +1,6 @@
+{
+  "name": "Shreeji Order",
+  "description": "Shreeji Client Order Management System for Imaging and Diagnostics Center",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
