@@ -109,7 +109,7 @@ Configure n8n to connect to PostgreSQL running on your Windows host from inside 
 
 #### 2. Where to do it:
 Open your n8n web interface:
-`http://localhost:5678` (or via ngrok: `https://finisher-pajamas-dipping.ngrok-free.dev`)
+`http://localhost:5678` 
 
 #### 3. Settings to enter:
 1. Navigate to **Credentials** → **Add Credential** → Select **Postgres**.
@@ -168,11 +168,7 @@ Deploy the contents of the `frontend/` directory to GitHub Pages.
 
 | Role | Username | Password | Organization / Hospital |
 |---|---|---|---|
-| **ADMIN** | `admin` | `Admin@Shreeji2026` | Shreeji Central Production & Dispatch Desk |
-| **CLIENT** | `apex_pet` | `Apex@2026` | Apex Cancer Hospital & Research Center |
-| **CLIENT** | `sterling_pet` | `Sterling@2026` | Sterling Diagnostic and Imaging Center |
-| **CLIENT** | `metro_pet` | `Metro@2026` | Metro Super Speciality Hospital |
-
+| **ADMIN** | `
 ---
 
 ## OPERATIONAL WORKFLOW & STATUS TIMELINE
